@@ -1,0 +1,5 @@
+[33m2cdfd62[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m init
+[33me662420[m[33m ([m[1;31mupstream/main[m[33m, [m[1;31mupstream/HEAD[m[33m)[m Merge pull request #5 from dtgreene/fix/auto-off-1
+[33m478524f[m[33m ([m[1;31mupstream/fix/auto-off-1[m[33m, [m[1;31morigin/fix/auto-off-1[m[33m)[m Fix auto off message and add setting response parsing
+[33m5642d3b[m Merge pull request #4 from dtgreene/feature/image-scaling-and-setting
+[33m30e7d33[m[33m ([m[1;31mupstream/feature/image-scaling-and-setting[m[33m, [m[1;31morigin/feature/image-scaling-and-setting[m[33m)[m Add setting task process response

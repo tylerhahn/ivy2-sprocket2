@@ -1,0 +1,135 @@
+# HP Sprocket 2 Support for Ivy2
+
+This repository has been modified to support the HP Sprocket 2 photo printer in addition to the original Canon Ivy 2 printer.
+
+## HP Sprocket 2 Specifications
+
+- **Print Size**: 2.3" x 3.4" (58mm x 86mm)
+- **Resolution**: 300 DPI
+- **Print Dimensions**: 800 x 1020 pixels
+- **Connection**: Bluetooth Low Energy (BLE)
+
+## Key Differences from Canon Ivy 2
+
+1. **Image Dimensions**: HP Sprocket 2 uses different print dimensions (800x1020 vs 640x1616)
+2. **Image Processing**: Modified image preparation function for Sprocket 2 specifications
+3. **Communication Protocol**: May require different Bluetooth commands (currently using same protocol as Ivy 2)
+
+## Installation
+
+Follow the same installation steps as the original Ivy 2:
+
+1. Install deb packages
+
+```bash
+sudo apt install bluetooth bluez libbluetooth-dev
+```
+
+2. Install pip packages
+
+```bash
+pip install -r requirements.txt
+```
+
+3. Install BlueZ directly from source
+
+```bash
+pip install git+https://github.com/pybluez/pybluez.git#egg=pybluez
+```
+
+4. Disable legacy pairing
+
+```bash
+sudo hciconfig 0 sspmode 0
+```
+
+## Pairing with HP Sprocket 2
+
+1. Turn on your HP Sprocket 2 printer
+2. Open Bluetooth settings on your device
+3. Look for "HP Sprocket 2" or similar device name
+4. Pair with the printer and note the MAC address
+
+## Usage
+
+### Basic Usage
+
+```python
+from sprocket2 import Sprocket2Printer
+
+# Replace with your printer's MAC address
+PRINTER_MAC = "XX:XX:XX:XX:XX:XX"
+
+printer = Sprocket2Printer()
+printer.connect(PRINTER_MAC)
+printer.print("./path/to/your/image.jpg")
+printer.disconnect()
+```
+
+### Example Script
+
+Run the example script to test your setup:
+
+```bash
+python sprocket2_example.py
+```
+
+This will provide an interactive menu to:
+
+1. Print a photo
+2. Preview how an image will look when printed
+3. Check printer status
+
+### Image Preparation
+
+The `prepare_image_sprocket2()` function handles:
+
+- Resizing images to fit the 2.3" x 3.4" print area
+- Maintaining aspect ratio with optional cropping
+- Converting to appropriate JPEG format
+- Optimizing for 300 DPI output
+
+## Files Modified/Added
+
+- `sprocket2.py`: New printer class for HP Sprocket 2
+- `image.py`: Added `prepare_image_sprocket2()` function
+- `sprocket2_example.py`: Example usage for HP Sprocket 2
+- `README_SPROCKET2.md`: This documentation
+
+## Troubleshooting
+
+### Common Issues
+
+1. **Connection Failed**: Ensure the printer is turned on and in pairing mode
+2. **"Invalid exchange" Error**: Run `sudo hciconfig 0 sspmode 0` to disable legacy pairing
+3. **Image Not Printing**: Check battery level and paper status
+4. **Wrong Image Size**: The image preparation function should handle this automatically
+
+### Debug Mode
+
+Enable debug logging to see detailed communication:
+
+```python
+from loguru import logger
+logger.add("debug.log", level="DEBUG")
+```
+
+## Limitations
+
+- Currently uses the same Bluetooth communication protocol as Canon Ivy 2
+- May need protocol adjustments based on actual HP Sprocket 2 specifications
+- Image rotation may need adjustment for optimal results
+- Some printer-specific features may not be fully implemented
+
+## Contributing
+
+If you have an HP Sprocket 2 and can help improve the implementation:
+
+1. Test the current implementation
+2. Report any issues or differences from expected behavior
+3. Help identify the correct Bluetooth communication protocol
+4. Provide feedback on image quality and print results
+
+## License
+
+Same as the original Ivy2 project.
