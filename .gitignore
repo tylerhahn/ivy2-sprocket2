@@ -1,5 +1,2 @@
-output/
-__pycache__/
-venv/
-.venv/
-preview_image.jpeg
+# Created by venv; see https://docs.python.org/3/library/venv.html
+*
