@@ -36,6 +36,52 @@ def preview_image(image_path, output_path="preview_image.jpeg"):
     with open(output_path, "wb") as file:
         file.write(image_data)
 
+def handle_printer_error(e):
+    """Handle printer-specific errors and return appropriate error messages."""
+    error_type = type(e).__name__
+
+    if error_type == 'LowBatteryError':
+        return jsonify({
+            'error': 'Printer battery is too low to print. Please charge the printer.',
+            'error_type': 'low_battery',
+            'suggestion': 'Charge the printer and try again.'
+        }), 503
+    elif error_type == 'CoverOpenError':
+        return jsonify({
+            'error': 'Printer cover is open. Please close the cover.',
+            'error_type': 'cover_open',
+            'suggestion': 'Close the printer cover and try again.'
+        }), 503
+    elif error_type == 'NoPaperError':
+        return jsonify({
+            'error': 'No paper in the printer. Please add paper.',
+            'error_type': 'no_paper',
+            'suggestion': 'Add paper to the printer and try again.'
+        }), 503
+    elif error_type == 'WrongSmartSheetError':
+        return jsonify({
+            'error': 'Wrong smart sheet detected. Please use the correct sheet.',
+            'error_type': 'wrong_sheet',
+            'suggestion': 'Use the correct smart sheet for your printer.'
+        }), 503
+    elif error_type == 'ClientUnavailableError':
+        return jsonify({
+            'error': 'Printer is not connected or unavailable.',
+            'error_type': 'connection_error',
+            'suggestion': 'Check that the printer is turned on and connected.'
+        }), 503
+    elif error_type == 'ReceiveTimeoutError':
+        return jsonify({
+            'error': 'Printer communication timeout.',
+            'error_type': 'timeout',
+            'suggestion': 'Try again or check printer connection.'
+        }), 503
+    else:
+        return jsonify({
+            'error': f'Printer error: {str(e)}',
+            'error_type': 'unknown_error'
+        }), 500
+
 @app.route('/print', methods=['POST'])
 def print_photo():
     """Endpoint to print a photo sent via HTTP request."""
@@ -53,21 +99,28 @@ def print_photo():
             filepath = os.path.join(UPLOAD_FOLDER, filename)
             file.save(filepath)
 
-            # Print the image
-            printer = Ivy2Printer()
-            printer.connect(PRINTER_MAC)
-            printer.print(filepath)
-            printer.disconnect()
+            try:
+                # Print the image
+                printer = Ivy2Printer()
+                printer.connect(PRINTER_MAC)
+                printer.print(filepath)
+                printer.disconnect()
 
-            # Clean up the uploaded file
-            os.remove(filepath)
+                # Clean up the uploaded file
+                os.remove(filepath)
 
-            return jsonify({'message': 'Photo printed successfully', 'filename': filename}), 200
+                return jsonify({'message': 'Photo printed successfully', 'filename': filename}), 200
+
+            except Exception as e:
+                # Clean up the uploaded file even if printing fails
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                return handle_printer_error(e)
         else:
             return jsonify({'error': 'Invalid file type. Allowed: png, jpg, jpeg, gif, bmp'}), 400
 
     except Exception as e:
-        return jsonify({'error': f'Printing failed: {str(e)}'}), 500
+        return jsonify({'error': f'Unexpected error: {str(e)}'}), 500
 
 @app.route('/print/pi', methods=['POST'])
 def print_photo_to_pi():
@@ -113,19 +166,26 @@ def print_photo_base64():
         with open(temp_filepath, 'wb') as f:
             f.write(image_data)
 
-        # Print the image
-        printer = Ivy2Printer()
-        printer.connect(PRINTER_MAC)
-        printer.print(temp_filepath)
-        printer.disconnect()
+        try:
+            # Print the image
+            printer = Ivy2Printer()
+            printer.connect(PRINTER_MAC)
+            printer.print(temp_filepath)
+            printer.disconnect()
 
-        # Clean up
-        os.remove(temp_filepath)
+            # Clean up
+            os.remove(temp_filepath)
 
-        return jsonify({'message': 'Photo printed successfully'}), 200
+            return jsonify({'message': 'Photo printed successfully'}), 200
+
+        except Exception as e:
+            # Clean up even if printing fails
+            if os.path.exists(temp_filepath):
+                os.remove(temp_filepath)
+            return handle_printer_error(e)
 
     except Exception as e:
-        return jsonify({'error': f'Printing failed: {str(e)}'}), 500
+        return jsonify({'error': f'Unexpected error: {str(e)}'}), 500
 
 @app.route('/print/base64/pi', methods=['POST'])
 def print_photo_base64_to_pi():
@@ -154,9 +214,19 @@ def printer_status():
         status = printer.get_status()
         printer.disconnect()
 
+        # Parse status for better response
+        error_code, battery_level, _, is_cover_open, is_no_paper, is_wrong_smart_sheet = status
+
         return jsonify({
             'connected': True,
-            'status': status
+            'status': {
+                'error_code': error_code,
+                'battery_level': battery_level,
+                'cover_open': is_cover_open,
+                'no_paper': is_no_paper,
+                'wrong_smart_sheet': is_wrong_smart_sheet,
+                'can_print': battery_level >= 30 and not is_cover_open and not is_no_paper and not is_wrong_smart_sheet
+            }
         }), 200
 
     except Exception as e:

@@ -24,7 +24,7 @@ from exceptions import (
 from client import ClientThread
 from utils import parse_incoming_message
 
-PRINT_BATTERY_MIN = 30
+PRINT_BATTERY_MIN = 10  # Lowered from 30 to 10 for testing
 PRINT_DATA_CHUNK = 990
 
 
