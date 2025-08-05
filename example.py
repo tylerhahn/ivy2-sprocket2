@@ -8,7 +8,7 @@ import requests
 
 app = Flask(__name__)
 
-PRINTER_MAC = "XX:XX:XX:XX:XX:XX"
+PRINTER_MAC = "10:23:81:44:C1:CD"
 UPLOAD_FOLDER = 'uploads'
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'bmp'}
 PI_ADDRESS = "192.168.1.63:5000"
