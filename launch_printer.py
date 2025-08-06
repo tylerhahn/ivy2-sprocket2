@@ -56,10 +56,12 @@ def get_all_jobs():
     with job_lock:
         return {job_id: job_data.copy() for job_id, job_data in job_status.items()}
 
+def create_printer_instance():
+    """Create a new printer instance with its own thread."""
+    return Ivy2Printer()
+
 def print_worker():
     """Background worker that processes print jobs from the queue."""
-    printer = None
-
     while True:
         try:
             # Get job from queue (blocking)
@@ -70,9 +72,8 @@ def print_worker():
 
             update_job_status(job_id, 'processing', 'Connecting to printer...', 10)
 
-            # Initialize printer if not already done
-            if printer is None:
-                printer = Ivy2Printer()
+            # Create a new printer instance for each job
+            printer = create_printer_instance()
 
             try:
                 # Connect to printer
@@ -108,6 +109,12 @@ def print_worker():
                 if os.path.exists(filepath):
                     os.remove(filepath)
                 update_job_status(job_id, 'failed', f'Print failed: {str(e)}', 0)
+            finally:
+                # Always disconnect the printer
+                try:
+                    printer.disconnect()
+                except:
+                    pass  # Ignore disconnect errors
 
         except queue.Empty:
             # No jobs in queue, continue waiting
@@ -250,9 +257,11 @@ def print_photo_immediate():
             filepath = os.path.join(UPLOAD_FOLDER, filename)
             file.save(filepath)
 
+            # Create a new printer instance
+            printer = create_printer_instance()
+
             try:
                 # Print the image immediately
-                printer = Ivy2Printer()
                 printer.connect(PRINTER_MAC)
                 printer.print(filepath)
                 printer.disconnect()
@@ -267,6 +276,12 @@ def print_photo_immediate():
                 if os.path.exists(filepath):
                     os.remove(filepath)
                 return handle_printer_error(e)
+            finally:
+                # Always disconnect
+                try:
+                    printer.disconnect()
+                except:
+                    pass
         else:
             return jsonify({'error': 'Invalid file type. Allowed: png, jpg, jpeg, gif, bmp'}), 400
 
@@ -437,7 +452,7 @@ def clear_queue():
 def printer_status():
     """Get printer status."""
     try:
-        printer = Ivy2Printer()
+        printer = create_printer_instance()
         printer.connect(PRINTER_MAC)
         status = printer.get_status()
         printer.disconnect()
@@ -478,7 +493,7 @@ def pi_status():
 def get_printer_settings():
     """Get current printer settings."""
     try:
-        printer = Ivy2Printer()
+        printer = create_printer_instance()
         printer.connect(PRINTER_MAC)
         settings = printer.get_setting()
         printer.disconnect()
@@ -511,7 +526,7 @@ def set_auto_power_off():
                 'supported_values': [3, 5, 10]
             }), 400
 
-        printer = Ivy2Printer()
+        printer = create_printer_instance()
         printer.connect(PRINTER_MAC)
         result = printer.set_setting(minutes)
         printer.disconnect()
@@ -529,7 +544,7 @@ def set_auto_power_off():
 def keep_printer_on():
     """Set printer to stay on (maximum auto power-off time)."""
     try:
-        printer = Ivy2Printer()
+        printer = create_printer_instance()
         printer.connect(PRINTER_MAC)
 
         # Set to maximum time (10 minutes) to keep it on as long as possible
@@ -549,7 +564,7 @@ def keep_printer_on():
 def disable_auto_power_off():
     """Attempt to disable auto power-off (if supported)."""
     try:
-        printer = Ivy2Printer()
+        printer = create_printer_instance()
         printer.connect(PRINTER_MAC)
 
         # Try to set to maximum time (10 minutes)
@@ -570,7 +585,7 @@ def disable_auto_power_off():
 def keep_alive():
     """Send a keep-alive signal to prevent printer from turning off."""
     try:
-        printer = Ivy2Printer()
+        printer = create_printer_instance()
         printer.connect(PRINTER_MAC)
 
         # Just get status to keep the connection alive
@@ -584,7 +599,7 @@ def keep_alive():
         }), 200
 
     except Exception as e:
-        return jsonify({e
+        return jsonify({
             'error': f'Keep-alive failed: {str(e)}',
             'status': 'printer_unavailable'
         }), 500
@@ -600,7 +615,7 @@ def start_keep_alive():
         def keep_alive_worker():
             while True:
                 try:
-                    printer = Ivy2Printer()
+                    printer = create_printer_instance()
                     printer.connect(PRINTER_MAC)
                     printer.get_status()  # Just ping the printer
                     printer.disconnect()

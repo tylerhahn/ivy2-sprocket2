@@ -29,7 +29,8 @@ PRINT_DATA_CHUNK = 990
 
 
 class Ivy2Printer:
-    client = ClientThread()
+    def __init__(self):
+        self.client = ClientThread()
 
     def connect(self, mac_address, port=1):
         self.client.connect(mac_address, port)
