@@ -3,3 +3,4 @@ Pillow==11.3.0
 Flask==2.3.3
 Werkzeug==2.3.7
 requests==2.31.0
+bleak==0.21.1
