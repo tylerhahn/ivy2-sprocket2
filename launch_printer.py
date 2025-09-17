@@ -17,7 +17,7 @@ app = Flask(__name__)
 PRINTER_MAC = "10:23:81:44:C1:CD"
 UPLOAD_FOLDER = 'uploads'
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'bmp'}
-PI_ADDRESS = "192.168.1.50:5000"
+PI_ADDRESS = "192.168.1.55:5000"
 
 # Create uploads directory if it doesn't exist
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
