@@ -150,16 +150,21 @@ class Ivy2Printer:
                         return True
                 else:
                     consecutive_ready = 0  # Reset counter if not ready
+                    # Log status issues but don't raise exceptions - these are just informational
                     if is_cover_open or is_no_paper or is_wrong_smart_sheet:
                         logger.debug(f"Printer not ready: cover_open={is_cover_open}, "
                                    f"no_paper={is_no_paper}, wrong_sheet={is_wrong_smart_sheet}")
+                        # Note: Don't raise exceptions here - data was already sent successfully
+                        # These status conditions might be transient or not critical at this point
 
                 time.sleep(poll_interval)
 
             except Exception as e:
-                logger.warning(f"Error checking print status: {e}")
+                # Catch any exceptions from status checks - don't let them propagate
+                # Data was already sent successfully, so we don't want to fail the job
+                logger.warning(f"Error checking print status (non-critical): {e}")
                 consecutive_ready = 0  # Reset on error
-                # Continue polling despite errors
+                # Continue polling despite errors - don't re-raise
                 time.sleep(poll_interval)
 
         elapsed = time.time() - start_time

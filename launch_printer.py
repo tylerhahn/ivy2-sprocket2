@@ -99,21 +99,87 @@ def get_active_print_count():
 
 
 def get_available_printer():
-    """Get an available printer MAC, or None if both are busy."""
+    """
+    Get an available printer MAC, or None if both are busy/unavailable.
+    Returns: (mac_address, None) if available, or (None, error_details) if unavailable.
+    error_details is a dict with 'error' and 'reason' keys.
+    """
+    unavailable_reasons = []
+
     with active_prints_lock:
         for mac in PRINTER_MACS:
             if mac not in active_prints:
                 # Check if printer is actually ready
                 try:
-                    ready, _ = check_printer_ready(mac)
+                    ready, message = check_printer_ready(mac)
                     if ready:
-                        return mac
+                        return mac, None
+                    else:
+                        # Get detailed status to understand why not ready
+                        ok, detail = safe_connect_status(mac)
+                        if ok and isinstance(detail, dict):
+                            reason_parts = []
+                            if detail.get('no_paper'):
+                                reason_parts.append("no paper")
+                            if detail.get('cover_open'):
+                                reason_parts.append("cover open")
+                            if detail.get('wrong_smart_sheet'):
+                                reason_parts.append("wrong smart sheet")
+                            if detail.get('battery_level', 100) < 10:
+                                reason_parts.append("low battery")
+                            reason = ", ".join(reason_parts) if reason_parts else message
+                            unavailable_reasons.append({
+                                'mac': mac,
+                                'reason': reason
+                            })
+                        else:
+                            unavailable_reasons.append({
+                                'mac': mac,
+                                'reason': detail if isinstance(detail, str) else "unavailable"
+                            })
                 except Exception as e:
                     # If printer check fails (timeout, connection error, etc.), skip it
                     # and try the next printer
                     logger.debug(f"Printer {mac} check failed: {e}")
+                    unavailable_reasons.append({
+                        'mac': mac,
+                        'reason': f"connection error: {str(e)}"
+                    })
                     continue
-        return None
+
+    # All printers are unavailable - return detailed error
+    if unavailable_reasons:
+        # Check if all have the same issue (like "no paper")
+        reasons = [r['reason'] for r in unavailable_reasons]
+        if all('no paper' in r.lower() for r in reasons):
+            return None, {
+                'error': 'All printers have no paper',
+                'error_type': 'no_paper',
+                'printers': unavailable_reasons,
+                'suggestion': 'Please add paper to the printers and try again.'
+            }
+        elif all('cover open' in r.lower() for r in reasons):
+            return None, {
+                'error': 'All printer covers are open',
+                'error_type': 'cover_open',
+                'printers': unavailable_reasons,
+                'suggestion': 'Please close the printer covers and try again.'
+            }
+        elif all('low battery' in r.lower() for r in reasons):
+            return None, {
+                'error': 'All printers have low battery',
+                'error_type': 'low_battery',
+                'printers': unavailable_reasons,
+                'suggestion': 'Please charge the printers and try again.'
+            }
+
+    # Mixed or other reasons
+    return None, {
+        'error': 'All printers are currently unavailable',
+        'error_type': 'printers_unavailable',
+        'printers': unavailable_reasons,
+        'suggestion': 'Please check the printer status and try again.'
+    }
 
 
 def start_print(job_id, printer_mac, filepath, filename):
@@ -140,9 +206,15 @@ def start_print(job_id, printer_mac, filepath, filename):
                 if is_cover_open:
                     raise Exception("Printer cover is open")
                 if is_no_paper:
-                    raise Exception("No paper in printer")
+                    error_msg = f"No paper in printer {printer_mac}. Please add paper and try again."
+                    logger.error(f"Print job {job_id}: {error_msg}")
+                    update_job_status(job_id, 'failed', error_msg, 0)
+                    raise Exception(error_msg)
                 if is_wrong_smart_sheet:
-                    raise Exception("Wrong smart sheet detected")
+                    error_msg = f"Wrong smart sheet in printer {printer_mac}. Please use the correct sheet."
+                    logger.error(f"Print job {job_id}: {error_msg}")
+                    update_job_status(job_id, 'failed', error_msg, 0)
+                    raise Exception(error_msg)
 
                 update_job_status(job_id, 'processing', 'Printing image...', 60)
 
@@ -158,20 +230,33 @@ def start_print(job_id, printer_mac, filepath, filename):
 
                 printer.print(filepath, transfer_timeout=transfer_timeout)
 
+                # Data transfer is complete - this is the critical success point
+                # The printer has received all the data and will print it
+                logger.info(f"Print job {job_id}: Data transfer complete. Printer has received image data.")
+
                 # Data transfer is complete, but printer might still be physically printing
                 update_job_status(job_id, 'processing', 'Waiting for print to complete...', 80)
 
                 # Wait for the printer to actually finish printing
                 # Poll status to ensure printer is ready before marking as complete
-                print_complete = printer.wait_for_print_complete(max_wait_time=180, poll_interval=2)
+                # If this fails or times out, we still consider the job successful since data was sent
+                try:
+                    print_complete = printer.wait_for_print_complete(max_wait_time=180, poll_interval=2)
 
-                if not print_complete:
-                    logger.warning(f"Print job {job_id}: Timeout waiting for print completion, but data was sent successfully")
+                    if not print_complete:
+                        logger.warning(f"Print job {job_id}: Timeout waiting for print completion, but data was sent successfully")
+                except Exception as wait_error:
+                    # Don't fail the job if waiting for completion fails
+                    # The data was already successfully transferred to the printer
+                    logger.warning(f"Print job {job_id}: Error during wait_for_print_complete: {wait_error}. "
+                                 f"Data was already sent successfully, marking job as completed.")
+                    print_complete = True  # Consider it complete since data was sent
 
                 # Clean up file
                 if os.path.exists(filepath):
                     os.remove(filepath)
 
+                # Mark as completed - data transfer was successful, which is what matters
                 update_job_status(job_id, 'completed', f'Printed on {printer_mac}', 100)
 
             except ReceiveTimeoutError as e:
@@ -431,9 +516,9 @@ def print_photo():
         if not file or not allowed_file(file.filename):
             return jsonify({'error': 'Invalid file type. Allowed: png, jpg, jpeg, gif, bmp'}), 400
 
-        # Check if both printers are busy
+        # Check if both printers are busy/unavailable
         try:
-            available_printer = get_available_printer()
+            available_printer, unavailable_error = get_available_printer()
         except Exception as e:
             logger.error(f"Error getting available printer: {e}")
             return jsonify({
@@ -442,17 +527,31 @@ def print_photo():
             }), 503
 
         if available_printer is None:
+            # Check if all printers are actively printing (busy)
             active_count = get_active_print_count()
             with active_prints_lock:
                 active_info = {mac: job_id for mac, job_id in active_prints.items()}
 
-            return jsonify({
-                'error': 'All printers are currently busy',
-                'status': 'printing',
-                'active_prints': active_count,
-                'max_printers': len(PRINTER_MACS),
-                'active_jobs': active_info
-            }), 503
+            # If all printers are actively printing, return busy message
+            if active_count >= len(PRINTER_MACS):
+                return jsonify({
+                    'error': 'All printers are currently busy',
+                    'status': 'printing',
+                    'active_prints': active_count,
+                    'max_printers': len(PRINTER_MACS),
+                    'active_jobs': active_info
+                }), 503
+
+            # Otherwise, return specific error (no paper, cover open, etc.)
+            if unavailable_error:
+                return jsonify(unavailable_error), 503
+            else:
+                return jsonify({
+                    'error': 'All printers are currently unavailable',
+                    'status': 'unavailable',
+                    'active_prints': active_count,
+                    'max_printers': len(PRINTER_MACS)
+                }), 503
 
         # Save file
         job_id = create_job_id()
@@ -509,9 +608,9 @@ def print_photo_base64():
         if not data or 'image_data' not in data:
             return jsonify({'error': 'No image data provided'}), 400
 
-        # Check if both printers are busy
+        # Check if both printers are busy/unavailable
         try:
-            available_printer = get_available_printer()
+            available_printer, unavailable_error = get_available_printer()
         except Exception as e:
             logger.error(f"Error getting available printer: {e}")
             return jsonify({
@@ -520,17 +619,31 @@ def print_photo_base64():
             }), 503
 
         if available_printer is None:
+            # Check if all printers are actively printing (busy)
             active_count = get_active_print_count()
             with active_prints_lock:
                 active_info = {mac: job_id for mac, job_id in active_prints.items()}
 
-            return jsonify({
-                'error': 'All printers are currently busy',
-                'status': 'printing',
-                'active_prints': active_count,
-                'max_printers': len(PRINTER_MACS),
-                'active_jobs': active_info
-            }), 503
+            # If all printers are actively printing, return busy message
+            if active_count >= len(PRINTER_MACS):
+                return jsonify({
+                    'error': 'All printers are currently busy',
+                    'status': 'printing',
+                    'active_prints': active_count,
+                    'max_printers': len(PRINTER_MACS),
+                    'active_jobs': active_info
+                }), 503
+
+            # Otherwise, return specific error (no paper, cover open, etc.)
+            if unavailable_error:
+                return jsonify(unavailable_error), 503
+            else:
+                return jsonify({
+                    'error': 'All printers are currently unavailable',
+                    'status': 'unavailable',
+                    'active_prints': active_count,
+                    'max_printers': len(PRINTER_MACS)
+                }), 503
 
         job_id = create_job_id()
         image_data_b = base64.b64decode(data['image_data'])
