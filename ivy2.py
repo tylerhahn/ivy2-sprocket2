@@ -106,7 +106,7 @@ class Ivy2Printer:
     def get_status(self):
         return self.__perform_task(GetStatusTask())
 
-    def wait_for_print_complete(self, max_wait_time=120, poll_interval=2, min_wait_time=30):
+    def wait_for_print_complete(self, max_wait_time=120, poll_interval=2, min_wait_time=45):
         """
         Poll the printer status until printing is complete.
         Returns True if print completed successfully, False if timeout or error.

@@ -13,20 +13,42 @@ import json
 from loguru import logger
 from exceptions import ReceiveTimeoutError
 
+# Try to load .env file
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    print("WARNING: python-dotenv not installed. Install with: pip install python-dotenv")
+    print("WARNING: Falling back to environment variables or defaults")
+
 app = Flask(__name__)
 
 # =========================
 # Printer & server config
 # =========================
-# Put your printer MACs here (two or more supported)
-PRINTER_MACS = [
-    "10:23:81:44:C1:CD",  # Printer A
-    "10:23:81:44:C1:CE",  # Printer B (update to your second MAC)
-]
+# Load printer MACs from .env file or environment variables
+# Format: PRINTER_MACS=AA:BB:CC:DD:EE:FF,11:22:33:44:55:66
+_printer_macs_env = os.getenv('PRINTER_MACS', '').strip()
 
-UPLOAD_FOLDER = 'uploads'
+if _printer_macs_env:
+    # Parse comma-separated MAC addresses
+    PRINTER_MACS = [mac.strip() for mac in _printer_macs_env.split(',') if mac.strip()]
+    logger.info(f"Loaded {len(PRINTER_MACS)} printer MAC(s) from environment: {PRINTER_MACS}")
+else:
+    # Fallback to default if not set in .env
+    PRINTER_MACS = [
+        "10:23:81:44:C1:CD",  # Printer A
+        "10:23:81:44:C1:CE",  # Printer B
+    ]
+    logger.warning(f"No PRINTER_MACS found in .env, using defaults: {PRINTER_MACS}")
+    logger.info("To configure printers, create a .env file with: PRINTER_MACS=AA:BB:CC:DD:EE:FF,11:22:33:44:55:66")
+
+if not PRINTER_MACS:
+    raise ValueError("No printer MAC addresses configured! Set PRINTER_MACS in .env file or environment variable.")
+
+UPLOAD_FOLDER = os.getenv('UPLOAD_FOLDER', 'uploads')
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'bmp'}
-PI_ADDRESS = "192.168.1.55:5000"
+PI_ADDRESS = os.getenv('PI_ADDRESS', "192.168.1.55:5000")
 
 # Create uploads directory if it doesn't exist
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
