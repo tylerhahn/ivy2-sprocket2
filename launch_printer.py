@@ -6,7 +6,6 @@ import base64
 from werkzeug.utils import secure_filename
 import requests
 import threading
-import queue
 import time
 import uuid
 from datetime import datetime
@@ -31,9 +30,11 @@ PI_ADDRESS = "192.168.1.55:5000"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 # =========================
-# Shared job queue & state
+# Active print tracking (max 2, one per printer)
 # =========================
-print_queue = queue.Queue()
+active_prints = {}     # mac -> job_id (tracks which printer is handling which job)
+active_prints_lock = threading.Lock()
+
 job_status = {}        # job_id -> status dict
 job_lock = threading.Lock()
 
@@ -58,13 +59,91 @@ def update_job_status(job_id, status, message="", progress=0, extra=None):
     """Update job status in a thread-safe way."""
     with job_lock:
         job_status[job_id] = {
-            'status': status,  # 'queued', 'processing', 'completed', 'failed', 'cancelled'
+            'status': status,  # 'processing', 'completed', 'failed'
             'message': message,
             'progress': progress,
             'timestamp': job_status.get(job_id, {}).get('timestamp', datetime.now().isoformat()),
             'updated_at': datetime.now().isoformat(),
             **(extra or {})
         }
+
+
+def get_active_print_count():
+    """Get number of currently active prints."""
+    with active_prints_lock:
+        return len(active_prints)
+
+
+def get_available_printer():
+    """Get an available printer MAC, or None if both are busy."""
+    with active_prints_lock:
+        for mac in PRINTER_MACS:
+            if mac not in active_prints:
+                # Check if printer is actually ready
+                ready, _ = check_printer_ready(mac)
+                if ready:
+                    return mac
+        return None
+
+
+def start_print(job_id, printer_mac, filepath, filename):
+    """Start a print job on a specific printer in a background thread."""
+    # Mark printer as active immediately (before starting thread)
+    with active_prints_lock:
+        active_prints[printer_mac] = job_id
+    
+    def print_worker():
+        try:
+            update_job_status(job_id, 'processing', f'Connecting to printer {printer_mac}...', 15, 
+                            extra={'printer_mac': printer_mac})
+            
+            printer = create_printer_instance()
+            try:
+                printer.connect(printer_mac)
+                
+                update_job_status(job_id, 'processing', 'Checking printer status...', 30)
+                status = printer.get_status()
+                error_code, battery_level, _, is_cover_open, is_no_paper, is_wrong_smart_sheet = status
+                
+                if battery_level < 10:
+                    raise Exception("Printer battery too low")
+                if is_cover_open:
+                    raise Exception("Printer cover is open")
+                if is_no_paper:
+                    raise Exception("No paper in printer")
+                if is_wrong_smart_sheet:
+                    raise Exception("Wrong smart sheet detected")
+                
+                update_job_status(job_id, 'processing', 'Printing image...', 60)
+                printer.print(filepath)
+                
+                # Clean up file
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                
+                update_job_status(job_id, 'completed', f'Printed on {printer_mac}', 100)
+                
+            except Exception as e:
+                # Clean up file even if printing fails
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                update_job_status(job_id, 'failed', f'Print failed on {printer_mac}: {str(e)}', 0)
+            finally:
+                try:
+                    printer.disconnect()
+                except:
+                    pass
+                # Remove from active prints
+                with active_prints_lock:
+                    active_prints.pop(printer_mac, None)
+                    
+        except Exception as e:
+            update_job_status(job_id, 'failed', f'Print error: {str(e)}', 0)
+            with active_prints_lock:
+                active_prints.pop(printer_mac, None)
+    
+    thread = threading.Thread(target=print_worker, daemon=True)
+    thread.start()
 
 
 def get_job_status(job_id):
@@ -140,101 +219,6 @@ def choose_available_printer():
     return None
 
 
-# =========================
-# Worker: one per printer
-# =========================
-def print_worker(printer_mac):
-    """
-    Dedicated worker for one printer. Pulls jobs from a shared queue.
-    If its printer isn't ready, it requeues the job so another worker can grab it.
-    """
-    while True:
-        job_data = None
-        try:
-            job_data = print_queue.get(timeout=1)
-        except queue.Empty:
-            continue
-
-        try:
-            job_id = job_data['job_id']
-            filepath = job_data['filepath']
-            filename = job_data['filename']
-            attempts = job_data.get('attempts', 0)
-
-            # Quick readiness check
-            ready, reason = check_printer_ready(printer_mac)
-            if not ready:
-                # Put job back for another worker to attempt
-                job_data['attempts'] = attempts + 1
-                update_job_status(
-                    job_id,
-                    'queued',
-                    f'Printer {printer_mac} unavailable ({reason}). Requeued.',
-                    extra={'attempts': job_data['attempts']}
-                )
-                print_queue.put(job_data)
-                time.sleep(0.8)  # let other workers contend
-                continue
-
-            update_job_status(job_id, 'processing',
-                              f'Using printer {printer_mac}: connecting...',
-                              15, extra={'printer_mac': printer_mac})
-
-            printer = create_printer_instance()
-            try:
-                printer.connect(printer_mac)
-
-                update_job_status(job_id, 'processing', 'Checking printer status...', 30)
-                status = printer.get_status()
-                error_code, battery_level, _, is_cover_open, is_no_paper, is_wrong_smart_sheet = status
-
-                if battery_level < 10:
-                    raise Exception("Printer battery too low")
-                if is_cover_open:
-                    raise Exception("Printer cover is open")
-                if is_no_paper:
-                    raise Exception("No paper in printer")
-                if is_wrong_smart_sheet:
-                    raise Exception("Wrong smart sheet detected")
-
-                update_job_status(job_id, 'processing', 'Printing image...', 60)
-                printer.print(filepath)
-
-                if os.path.exists(filepath):
-                    os.remove(filepath)
-
-                update_job_status(job_id, 'completed', f'Printed on {printer_mac}', 100)
-
-            except Exception as e:
-                # Clean up file even if printing fails
-                if os.path.exists(filepath):
-                    os.remove(filepath)
-                update_job_status(job_id, 'failed',
-                                  f'Print failed on {printer_mac}: {str(e)}', 0)
-            finally:
-                try:
-                    printer.disconnect()
-                except:
-                    pass
-
-        except Exception as e:
-            if job_data and 'job_id' in job_data:
-                update_job_status(job_data['job_id'], 'failed', f'Worker error: {str(e)}', 0)
-        finally:
-            try:
-                print_queue.task_done()
-            except:
-                pass
-
-
-def start_print_workers():
-    """Start one worker thread per configured printer MAC."""
-    threads = []
-    for mac in PRINTER_MACS:
-        t = threading.Thread(target=print_worker, args=(mac,), daemon=True)
-        t.start()
-        threads.append(t)
-    return threads
 
 
 # =========================
@@ -361,7 +345,7 @@ def keep_alive_ping(mac):
 # =========================
 @app.route('/print', methods=['POST'])
 def print_photo():
-    """Upload and queue a photo for printing (distributed across printers)."""
+    """Upload and print a photo immediately. Returns error if both printers are busy."""
     try:
         if 'image' not in request.files:
             return jsonify({'error': 'No image file provided'}), 400
@@ -370,105 +354,45 @@ def print_photo():
         if file.filename == '':
             return jsonify({'error': 'No file selected'}), 400
 
-        if file and allowed_file(file.filename):
-            job_id = create_job_id()
-            filename = secure_filename(file.filename)
-            filepath = os.path.join(UPLOAD_FOLDER, f"{job_id}_{filename}")
-            file.save(filepath)
+        if not file or not allowed_file(file.filename):
+            return jsonify({'error': 'Invalid file type. Allowed: png, jpg, jpeg, gif, bmp'}), 400
 
-            job_data = {
-                'job_id': job_id,
-                'filepath': filepath,
-                'filename': filename,
-                'created_at': datetime.now().isoformat(),
-                'attempts': 0,
-                'preferred_printer': None  # reserved for future targeting
-            }
-
-            print_queue.put(job_data)
-            update_job_status(job_id, 'queued', 'Job added to print queue', 0, extra={'attempts': 0})
-
+        # Check if both printers are busy
+        available_printer = get_available_printer()
+        if available_printer is None:
+            active_count = get_active_print_count()
+            with active_prints_lock:
+                active_info = {mac: job_id for mac, job_id in active_prints.items()}
+            
             return jsonify({
-                'message': 'Print job queued successfully',
-                'job_id': job_id,
-                'filename': filename,
-                'queue_position': print_queue.qsize()
-            }), 202
-        else:
-            return jsonify({'error': 'Invalid file type. Allowed: png, jpg, jpeg, gif, bmp'}), 400
+                'error': 'All printers are currently busy',
+                'status': 'printing',
+                'active_prints': active_count,
+                'max_printers': len(PRINTER_MACS),
+                'active_jobs': active_info
+            }), 503
+
+        # Save file
+        job_id = create_job_id()
+        filename = secure_filename(file.filename)
+        filepath = os.path.join(UPLOAD_FOLDER, f"{job_id}_{filename}")
+        file.save(filepath)
+
+        # Start print in background thread
+        start_print(job_id, available_printer, filepath, filename)
+
+        return jsonify({
+            'message': 'Print job started',
+            'job_id': job_id,
+            'filename': filename,
+            'printer_mac': available_printer,
+            'status': 'processing'
+        }), 202
 
     except Exception as e:
         return jsonify({'error': f'Unexpected error: {str(e)}'}), 500
 
 
-@app.route('/print/immediate', methods=['POST'])
-def print_photo_immediate():
-    """Try to print a photo immediately on any ready printer; otherwise queue it."""
-    try:
-        if 'image' not in request.files:
-            return jsonify({'error': 'No image file provided'}), 400
-
-        file = request.files['image']
-        if file.filename == '':
-            return jsonify({'error': 'No file selected'}), 400
-
-        if file and allowed_file(file.filename):
-            filename = secure_filename(file.filename)
-            filepath = os.path.join(UPLOAD_FOLDER, filename)
-            file.save(filepath)
-
-            chosen_mac = choose_available_printer()
-            if not chosen_mac:
-                # Fall back to queue
-                job_id = create_job_id()
-                job_data = {
-                    'job_id': job_id,
-                    'filepath': filepath,
-                    'filename': filename,
-                    'created_at': datetime.now().isoformat(),
-                    'attempts': 0
-                }
-                print_queue.put(job_data)
-                update_job_status(job_id, 'queued', 'No printers immediately ready; queued for next available.', 0)
-                return jsonify({
-                    'message': 'No printers ready; job queued',
-                    'job_id': job_id,
-                    'queue_position': print_queue.qsize()
-                }), 202
-
-            printer = create_printer_instance()
-            try:
-                printer.connect(chosen_mac)
-                printer.print(filepath)
-                # Clean up uploaded file
-                if os.path.exists(filepath):
-                    os.remove(filepath)
-                return jsonify({'message': 'Photo printed successfully',
-                                'filename': filename,
-                                'printer_mac': chosen_mac}), 200
-            except Exception as e:
-                # On failure, queue it
-                job_id = create_job_id()
-                job_data = {
-                    'job_id': job_id,
-                    'filepath': filepath,
-                    'filename': filename,
-                    'created_at': datetime.now().isoformat(),
-                    'attempts': 0
-                }
-                print_queue.put(job_data)
-                update_job_status(job_id, 'queued', f'Immediate failed on {chosen_mac}: {str(e)}; job queued.', 0)
-                return jsonify({'message': 'Immediate print failed; job queued', 'job_id': job_id}), 202
-            finally:
-                try:
-                    printer.disconnect()
-                except:
-                    pass
-        else:
-            return jsonify({'error': 'Invalid file type. Allowed: png, jpg, jpeg, gif, bmp'}), 400
-
-    except Exception as e:
-        return jsonify({'error': f'Unexpected error: {str(e)}'}), 500
 
 
 @app.route('/print/pi', methods=['POST'])
@@ -497,11 +421,26 @@ def print_photo_to_pi():
 
 @app.route('/print/base64', methods=['POST'])
 def print_photo_base64():
-    """Queue a photo that is sent as base64 data."""
+    """Print a photo sent as base64 data. Returns error if both printers are busy."""
     try:
         data = request.get_json()
         if not data or 'image_data' not in data:
             return jsonify({'error': 'No image data provided'}), 400
+
+        # Check if both printers are busy
+        available_printer = get_available_printer()
+        if available_printer is None:
+            active_count = get_active_print_count()
+            with active_prints_lock:
+                active_info = {mac: job_id for mac, job_id in active_prints.items()}
+            
+            return jsonify({
+                'error': 'All printers are currently busy',
+                'status': 'printing',
+                'active_prints': active_count,
+                'max_printers': len(PRINTER_MACS),
+                'active_jobs': active_info
+            }), 503
 
         job_id = create_job_id()
         image_data_b = base64.b64decode(data['image_data'])
@@ -512,20 +451,14 @@ def print_photo_base64():
         with open(temp_filepath, 'wb') as f:
             f.write(image_data_b)
 
-        job_data = {
-            'job_id': job_id,
-            'filepath': temp_filepath,
-            'filename': 'base64_image.jpg',
-            'created_at': datetime.now().isoformat(),
-            'attempts': 0
-        }
-        print_queue.put(job_data)
-        update_job_status(job_id, 'queued', 'Job added to print queue', 0)
+        # Start print in background thread
+        start_print(job_id, available_printer, temp_filepath, 'base64_image.jpg')
 
         return jsonify({
-            'message': 'Print job queued successfully',
+            'message': 'Print job started',
             'job_id': job_id,
-            'queue_position': print_queue.qsize()
+            'printer_mac': available_printer,
+            'status': 'processing'
         }), 202
 
     except Exception as e:
@@ -557,10 +490,15 @@ def list_jobs():
     """List all print jobs."""
     try:
         jobs = get_all_jobs()
-        queue_size = print_queue.qsize()
+        active_count = get_active_print_count()
+        with active_prints_lock:
+            active_info = {mac: job_id for mac, job_id in active_prints.items()}
+        
         return jsonify({
             'jobs': jobs,
-            'queue_size': queue_size,
+            'active_prints': active_count,
+            'active_jobs': active_info,
+            'max_printers': len(PRINTER_MACS),
             'total_jobs': len(jobs)
         }), 200
     except Exception as e:
@@ -585,42 +523,36 @@ def get_job(job_id):
 
 @app.route('/jobs/<job_id>', methods=['DELETE'])
 def cancel_job(job_id):
-    """Cancel a print job (if it's still queued)."""
+    """Cancel a print job (only if not processing)."""
     try:
         job = get_job_status(job_id)
         if job is None:
             return jsonify({'error': 'Job not found'}), 404
 
-        if job['status'] == 'queued':
-            update_job_status(job_id, 'cancelled', 'Job cancelled by user', 0)
-            return jsonify({'message': 'Job cancelled successfully'}), 200
+        # Check if job is currently printing
+        with active_prints_lock:
+            printer_mac = None
+            for mac, active_job_id in active_prints.items():
+                if active_job_id == job_id:
+                    printer_mac = mac
+                    break
+            
+            if printer_mac:
+                return jsonify({
+                    'error': 'Cannot cancel job that is currently printing',
+                    'status': job['status'],
+                    'printer_mac': printer_mac
+                }), 400
+
+        if job['status'] == 'processing':
+            return jsonify({'error': 'Cannot cancel job that is currently processing'}), 400
+        elif job['status'] in ['completed', 'failed']:
+            return jsonify({'error': 'Cannot cancel job that is already completed or failed'}), 400
         else:
-            return jsonify({'error': 'Cannot cancel job that is already processing or completed'}), 400
+            # Job not found in active prints and not processing - might be a race condition
+            return jsonify({'message': 'Job is not currently active'}), 200
     except Exception as e:
         return jsonify({'error': f'Failed to cancel job: {str(e)}'}), 500
-
-
-@app.route('/queue/clear', methods=['POST'])
-def clear_queue():
-    """Clear all queued jobs."""
-    try:
-        while not print_queue.empty():
-            try:
-                print_queue.get_nowait()
-                print_queue.task_done()
-            except queue.Empty:
-                break
-
-        with job_lock:
-            for job_id, job_data in job_status.items():
-                if job_data['status'] == 'queued':
-                    job_data['status'] = 'cancelled'
-                    job_data['message'] = 'Job cancelled due to queue clear'
-                    job_data['updated_at'] = datetime.now().isoformat()
-
-        return jsonify({'message': 'Queue cleared successfully'}), 200
-    except Exception as e:
-        return jsonify({'error': f'Failed to clear queue: {str(e)}'}), 500
 
 
 # =========================
@@ -847,11 +779,16 @@ def start_keep_alive():
 def health_check():
     """Health check endpoint."""
     try:
+        active_count = get_active_print_count()
+        with active_prints_lock:
+            active_info = {mac: job_id for mac, job_id in active_prints.items()}
+        
         return jsonify({
             'status': 'healthy',
             'service': 'ivy2-printer-api',
-            'queue_size': print_queue.qsize(),
-            'active_jobs': len([j for j in job_status.values() if j['status'] in ['queued', 'processing']]),
+            'active_prints': active_count,
+            'max_printers': len(PRINTER_MACS),
+            'active_jobs': active_info,
             'printers': PRINTER_MACS,
             'keep_alive_running': {
                 m: (m in keep_alive_threads and keep_alive_threads[m].is_alive())
@@ -866,23 +803,19 @@ def health_check():
 # Main
 # =========================
 if __name__ == '__main__':
-    # Start the print workers (one per printer)
-    print("Starting print worker threads...")
-    start_print_workers()
     print("Printers:", PRINTER_MACS)
+    print(f"Max concurrent prints: {len(PRINTER_MACS)} (one per printer)")
 
     # Run the Flask app
     print("Starting Ivy2 Printer API server...")
     print("Available endpoints:")
-    print("  POST /print - Upload and print an image file (queued, multi-printer)")
-    print("  POST /print/immediate - Upload and print immediately (or queue) on any ready printer")
+    print("  POST /print - Upload and print an image file (returns 503 if all printers busy)")
     print("  POST /print/pi - Upload and print an image file (via Pi)")
-    print("  POST /print/base64 - Print base64 encoded image (queued)")
+    print("  POST /print/base64 - Print base64 encoded image (returns 503 if all printers busy)")
     print("  POST /print/base64/pi - Print base64 encoded image (via Pi)")
     print("  GET  /jobs - List all print jobs")
     print("  GET  /jobs/<job_id> - Get specific job status")
-    print("  DELETE /jobs/<job_id> - Cancel a queued job")
-    print("  POST /queue/clear - Clear all queued jobs")
+    print("  DELETE /jobs/<job_id> - Cancel a job (if not processing)")
     print("  GET  /status - Get status for all printers or one via ?mac=..")
     print("  GET  /status/pi - Get Raspberry Pi status")
     print("  GET  /settings - Get settings for all printers or one via ?mac=..")
@@ -891,7 +824,7 @@ if __name__ == '__main__':
     print("  POST /settings/disable-auto-off - Alias of keep-on (Ivy 2 cannot fully disable)")
     print("  POST /keep-alive - One ping (all or ?mac=..)")
     print("  POST /keep-alive/start - Start background pings (all or ?mac=..) {interval: seconds}")
-    print("  GET  /health - Health + keep-alive state")
+    print("  GET  /health - Health + active print state")
     print(f"\nPi address: {PI_ADDRESS}")
     print("\nServer will start on http://0.0.0.0:5000")
 
