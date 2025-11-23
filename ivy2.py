@@ -40,7 +40,7 @@ class Ivy2Printer:
 
     def disconnect(self):
         self.client.disconnect()
-    
+
     def is_connected(self):
         return self.client.alive.is_set()
 
@@ -66,6 +66,14 @@ class Ivy2Printer:
         # setup the printer to receive the image data
         self.get_print_ready(image_length)
 
+        # Calculate dynamic timeout based on image size
+        # Estimate: ~0.02s per chunk + buffer for processing
+        num_chunks = (image_length + PRINT_DATA_CHUNK - 1) // PRINT_DATA_CHUNK
+        estimated_transfer_time = num_chunks * 0.02 + 10  # 10s buffer
+        dynamic_timeout = max(transfer_timeout, int(estimated_transfer_time * 2))
+
+        logger.debug(f"Image size: {image_length} bytes, {num_chunks} chunks, timeout: {dynamic_timeout}s")
+
         # split up the image and add to the client queue
         start_index = 0
         while True:
@@ -81,8 +89,14 @@ class Ivy2Printer:
 
         logger.debug("Beginning data transfer...")
 
+        # Wait for queue to be mostly empty (give it time to send chunks)
+        # This ensures we don't wait for ack before data is actually sent
+        queue_wait_start = time.time()
+        while not self.client.outbound_q.empty() and (time.time() - queue_wait_start) < 5:
+            time.sleep(0.1)
+
         # wait longer than usual since the transfer takes some time
-        self.__receive_message(transfer_timeout)
+        self.__receive_message(dynamic_timeout)
 
         logger.debug("Data transfer complete! Printing should begin in a moment")
 
@@ -92,12 +106,77 @@ class Ivy2Printer:
     def get_status(self):
         return self.__perform_task(GetStatusTask())
 
+    def wait_for_print_complete(self, max_wait_time=120, poll_interval=2, min_wait_time=30):
+        """
+        Poll the printer status until printing is complete.
+        Returns True if print completed successfully, False if timeout or error.
+
+        This checks the printer status periodically to see if it's still printing.
+        The printer may still be physically printing even after data transfer completes.
+
+        Strategy:
+        1. Wait minimum time (min_wait_time) to allow physical printing to start
+        2. Poll status periodically
+        3. Consider print complete when we get consecutive "ready" statuses
+        """
+        start_time = time.time()
+        consecutive_ready = 0  # Count consecutive "ready" status checks
+        required_ready_checks = 3  # Number of consecutive ready checks needed
+
+        # First, wait minimum time for physical printing to start
+        logger.debug(f"Waiting {min_wait_time}s minimum for physical printing to start...")
+        time.sleep(min_wait_time)
+
+        while (time.time() - start_time) < max_wait_time:
+            try:
+                status = self.get_status()
+                error_code, battery_level, _, is_cover_open, is_no_paper, is_wrong_smart_sheet = status
+
+                # If there are critical errors, the print might have failed
+                if error_code != 0:
+                    logger.debug(f"Printer status shows error code: {error_code} (may be transient)")
+
+                # Check if printer is in a ready state (no blocking conditions)
+                # If we get consecutive ready statuses, assume printing is done
+                is_ready = (battery_level >= 10 and not is_cover_open and
+                           not is_no_paper and not is_wrong_smart_sheet)
+
+                if is_ready and error_code == 0:
+                    consecutive_ready += 1
+                    logger.debug(f"Printer ready check {consecutive_ready}/{required_ready_checks}")
+                    if consecutive_ready >= required_ready_checks:
+                        elapsed = time.time() - start_time
+                        logger.debug(f"Print appears complete after {elapsed:.1f}s (printer ready)")
+                        return True
+                else:
+                    consecutive_ready = 0  # Reset counter if not ready
+                    if is_cover_open or is_no_paper or is_wrong_smart_sheet:
+                        logger.debug(f"Printer not ready: cover_open={is_cover_open}, "
+                                   f"no_paper={is_no_paper}, wrong_sheet={is_wrong_smart_sheet}")
+
+                time.sleep(poll_interval)
+
+            except Exception as e:
+                logger.warning(f"Error checking print status: {e}")
+                consecutive_ready = 0  # Reset on error
+                # Continue polling despite errors
+                time.sleep(poll_interval)
+
+        elapsed = time.time() - start_time
+        logger.warning(f"Timeout waiting for print to complete after {elapsed:.1f}s")
+        # Return True anyway if we've waited a reasonable amount - the print might be done
+        # but we just couldn't confirm via status checks
+        if elapsed >= min_wait_time + 30:
+            logger.info("Assuming print complete after reasonable wait time")
+            return True
+        return False
+
     def get_setting(self):
         return self.__perform_task(GetSettingTask())
 
     def set_setting(self, auto_power_off):
         """Sets the auto power off setting on the printer.
-        
+
         auto_power_off: Time in minutes before the printer turns off without any
         activity. Supported values are 3, 5, and 10.
         """

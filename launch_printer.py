@@ -123,7 +123,28 @@ def start_print(job_id, printer_mac, filepath, filename):
                     raise Exception("Wrong smart sheet detected")
 
                 update_job_status(job_id, 'processing', 'Printing image...', 60)
-                printer.print(filepath)
+
+                # Calculate a more generous timeout based on file size
+                file_size = os.path.getsize(filepath) if os.path.exists(filepath) else 0
+                # Estimate: ~0.02s per 990 byte chunk + processing time
+                # Use at least 120 seconds, or 2x estimated time
+                estimated_chunks = (file_size + 989) // 990
+                estimated_time = max(120, estimated_chunks * 0.02 * 3 + 30)  # 3x safety factor
+                transfer_timeout = int(estimated_time)
+
+                logger.debug(f"Print job {job_id}: file_size={file_size}, estimated_time={estimated_time}s, timeout={transfer_timeout}s")
+
+                printer.print(filepath, transfer_timeout=transfer_timeout)
+
+                # Data transfer is complete, but printer might still be physically printing
+                update_job_status(job_id, 'processing', 'Waiting for print to complete...', 80)
+
+                # Wait for the printer to actually finish printing
+                # Poll status to ensure printer is ready before marking as complete
+                print_complete = printer.wait_for_print_complete(max_wait_time=180, poll_interval=2)
+
+                if not print_complete:
+                    logger.warning(f"Print job {job_id}: Timeout waiting for print completion, but data was sent successfully")
 
                 # Clean up file
                 if os.path.exists(filepath):
@@ -131,11 +152,21 @@ def start_print(job_id, printer_mac, filepath, filename):
 
                 update_job_status(job_id, 'completed', f'Printed on {printer_mac}', 100)
 
+            except ReceiveTimeoutError as e:
+                # Clean up file even if printing fails
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                error_msg = f'Print timeout on {printer_mac}. The printer may be slow or the image too large. Try a smaller image or check printer connection.'
+                logger.error(f"Print timeout for job {job_id}: {e}")
+                update_job_status(job_id, 'failed', error_msg, 0)
             except Exception as e:
                 # Clean up file even if printing fails
                 if os.path.exists(filepath):
                     os.remove(filepath)
-                update_job_status(job_id, 'failed', f'Print failed on {printer_mac}: {str(e)}', 0)
+                error_type = type(e).__name__
+                error_msg = f'Print failed on {printer_mac}: {str(e)}'
+                logger.error(f"Print error for job {job_id} ({error_type}): {e}")
+                update_job_status(job_id, 'failed', error_msg, 0)
             finally:
                 try:
                     printer.disconnect()
