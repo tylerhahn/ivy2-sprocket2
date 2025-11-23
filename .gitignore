@@ -4,3 +4,4 @@ venv/
 .venv/
 preview_image.jpeg
 .history
+/frontend/node_modules
