@@ -11,7 +11,13 @@ import uuid
 from datetime import datetime
 import json
 from loguru import logger
-from exceptions import ReceiveTimeoutError
+from exceptions import (
+    ReceiveTimeoutError,
+    NoPaperError,
+    CoverOpenError,
+    LowBatteryError,
+    WrongSmartSheetError
+)
 
 # Try to load .env file
 try:
@@ -259,6 +265,36 @@ def start_print(job_id, printer_mac, filepath, filename):
                 # Mark as completed - data transfer was successful, which is what matters
                 update_job_status(job_id, 'completed', f'Printed on {printer_mac}', 100)
 
+            except NoPaperError as e:
+                # Clean up file even if printing fails
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                error_msg = (f'No paper detected in printer {printer_mac} when attempting to print. '
+                            f'This may occur if paper ran out between the initial check and print start, '
+                            f'or if the printer status has not updated yet. Please add paper and retry.')
+                logger.error(f"Print job {job_id}: {error_msg}")
+                update_job_status(job_id, 'failed', error_msg, 0)
+            except CoverOpenError as e:
+                # Clean up file even if printing fails
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                error_msg = f'Printer cover is open on {printer_mac}. Please close the cover and the print can be retried.'
+                logger.error(f"Print job {job_id}: {error_msg}")
+                update_job_status(job_id, 'failed', error_msg, 0)
+            except LowBatteryError as e:
+                # Clean up file even if printing fails
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                error_msg = f'Printer {printer_mac} battery is too low to print. Please charge the printer and the print can be retried.'
+                logger.error(f"Print job {job_id}: {error_msg}")
+                update_job_status(job_id, 'failed', error_msg, 0)
+            except WrongSmartSheetError as e:
+                # Clean up file even if printing fails
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                error_msg = f'Wrong smart sheet detected in printer {printer_mac}. Please use the correct sheet and the print can be retried.'
+                logger.error(f"Print job {job_id}: {error_msg}")
+                update_job_status(job_id, 'failed', error_msg, 0)
             except ReceiveTimeoutError as e:
                 # Clean up file even if printing fails
                 if os.path.exists(filepath):
